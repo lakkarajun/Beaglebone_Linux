@@ -1,0 +1,16 @@
+# List the SD card partitions
+echo "List the SD card partitions..."
+fdisk -l
+# Mounting boot and rootfs partitions
+echo "Mounting boot and rootfs partitions..."
+mount /dev/sdb1 boot
+mount /dev/sdb2 rootfs
+# Copying zImage and am335x-vsc8531bbb.dts in SDcard... 
+echo "Copying zImage and am335x-vsc8531bbb.dts in SDcard..."
+cp arch/arm/boot/zImage boot/.
+cp arch/arm/boot/dts/am335x-vsc8531bbb.dts boot/.
+# Un-mounting boot and rootfs partitions
+echo "Un-mounting boot and rootfs partitions..."
+umount boot
+umount rootfs
+

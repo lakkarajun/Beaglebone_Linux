@@ -1,0 +1,9 @@
+# Clean all .obj and .config files
+echo "Clean the obj and config files..."
+make distclean
+# Create .config file from raju_bbb_defconfig
+echo "Creating .config from defconfig file..."
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- raju_bbb_defconfig
+# Build the zImage and dts file:
+echo "Building zImage and dtb..."
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- zImage dtbs -j4
