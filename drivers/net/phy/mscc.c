@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/netdevice.h>
 #include <dt-bindings/net/mscc-phy-vsc8531.h>
+#include "microchip_netlink.h"
 
 enum rgmii_rx_clock_delay {
 	RGMII_RX_CLK_DELAY_0_2_NS = 0,
@@ -74,6 +75,33 @@ enum rgmii_rx_clock_delay {
 #define DOWNSHIFT_EN			  0x0010
 #define DOWNSHIFT_CNTL_POS		  2
 
+#define MSCC_PHY_EXT_PHY_CNTL_4		  23
+#define PHY_CNTL_4_ADDR_POS		  11
+
+#define MSCC_PHY_VERIPHY_CNTL_1		  24
+#define VERIPHY_TRIGGER_CNTL_MASK     0x8000
+#define VERIPHY_VALID_MASK			  0x4000
+#define VERIPHY_PAIR_A_DISTANCE_MASK  0x2F00
+#define VERIPHY_PAIR_A_DISTANCE_POS	  8
+#define VERIPHY_PAIR_B_DISTANCE_MASK  0x002F
+#define VERIPHY_PAIR_B_DISTANCE_POS	  0
+
+#define MSCC_PHY_VERIPHY_CNTL_2		  25
+#define VERIPHY_PAIR_C_DISTANCE_MASK  0x2F00
+#define VERIPHY_PAIR_C_DISTANCE_POS	  8
+#define VERIPHY_PAIR_D_DISTANCE_MASK  0x002F
+#define VERIPHY_PAIR_D_DISTANCE_POS	  0
+
+#define MSCC_PHY_VERIPHY_CNTL_3		  26
+#define VERIPHY_PAIR_A_STATUS_MASK	  0xF000
+#define VERIPHY_PAIR_A_STATUS_POS	  12
+#define VERIPHY_PAIR_B_STATUS_MASK	  0x0F00
+#define VERIPHY_PAIR_B_STATUS_POS	  8
+#define VERIPHY_PAIR_C_STATUS_MASK	  0x00F0
+#define VERIPHY_PAIR_C_STATUS_POS	  4
+#define VERIPHY_PAIR_D_STATUS_MASK	  0x000F
+#define VERIPHY_PAIR_D_STATUS_POS	  0
+
 /* Extended Page 2 Registers */
 #define MSCC_PHY_RGMII_CNTL		  20
 #define RGMII_RX_CLK_DELAY_MASK		  0x0070
@@ -102,6 +130,19 @@ enum rgmii_rx_clock_delay {
 #define MSCC_VDDMAC_3300		  3300
 
 #define DOWNSHIFT_COUNT_MAX		  5
+
+#define MSCC_CORRECTLY_PAIR        0x0
+#define MSCC_OPEN_PAIR             0x1
+#define MSCC_SHORTED_PAIR          0x2
+#define MSCC_ABNORMAL_TERMINATION  0x4
+#define CROSS_PAIR_SHORT_TO_PAIR_A 0x8
+#define CROSS_PAIR_SHORT_TO_PAIR_B 0x9
+#define CROSS_PAIR_SHORT_TO_PAIR_C 0xA
+#define CROSS_PAIR_SHORT_TO_PAIR_D 0xB
+#define ABNORMAL_CROSS_PAIR_A      0xC
+#define ABNORMAL_CROSS_PAIR_B      0xD
+#define ABNORMAL_CROSS_PAIR_C      0xE
+#define ABNORMAL_CROSS_PAIR_D      0xF
 
 struct vsc8531_private {
 	int rate_magic;
@@ -372,6 +413,118 @@ out_unlock:
 	mutex_unlock(&phydev->lock);
 }
 
+static int vsc85xx_cable_diag_set(struct phy_device *phydev,
+								  void *in)
+								 // struct phynl_cabdiag_req *conf)
+{
+	int rc;
+	u16 reg_val;
+	// Need to fix: timeout parameter
+	//struct phynl_cabdiag_req *conf = (struct phynl_cabdiag_req *)in;
+
+	mutex_lock(&phydev->lock);
+	rc = phy_select_page(phydev, MSCC_PHY_PAGE_EXTENDED);
+	if (rc < 0)
+		goto out_unlock;
+
+	reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_1);
+	reg_val |= VERIPHY_TRIGGER_CNTL_MASK;
+	__phy_write(phydev, MSCC_PHY_VERIPHY_CNTL_1, reg_val);
+
+out_unlock:
+	phy_restore_page(phydev, rc, rc > 0 ? 0 : rc);
+	mutex_unlock(&phydev->lock);
+
+	return rc;
+}
+
+static void vsc85xx_cable_diag_get(struct phy_device *phydev,
+								   void *in)
+								 //  struct phynl_cabdiag_status *status)
+{
+	int rc;
+	u16 reg_val;
+	struct phynl_cabdiag_status *status = (struct phynl_cabdiag_status *)in;
+
+	mutex_lock(&phydev->lock);
+	rc = phy_select_page(phydev, MSCC_PHY_PAGE_EXTENDED);
+	if (rc < 0)
+		goto out_unlock;
+
+do {
+	reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_1);
+	if (reg_val & VERIPHY_VALID_MASK) {
+		/* VeriPHY results are valid */
+		if (status->pairs_bitmask & CABDIAG_PAIR_A_MASK) {
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_1);
+			status->pairs[CABDIAG_PAIR_A].length =
+				(reg_val & VERIPHY_PAIR_A_DISTANCE_MASK) >> VERIPHY_PAIR_A_DISTANCE_POS;
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_3);
+			status->pairs[CABDIAG_PAIR_A].result =
+				(reg_val & VERIPHY_PAIR_A_STATUS_MASK) >> VERIPHY_PAIR_A_STATUS_POS;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_B_MASK) {
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_1);
+			status->pairs[CABDIAG_PAIR_B].length =
+				(reg_val & VERIPHY_PAIR_B_DISTANCE_MASK) >> VERIPHY_PAIR_B_DISTANCE_POS;
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_3);
+			status->pairs[CABDIAG_PAIR_B].result =
+				(reg_val & VERIPHY_PAIR_B_STATUS_MASK) >> VERIPHY_PAIR_B_STATUS_POS;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_C_MASK) {
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_2);
+			status->pairs[CABDIAG_PAIR_C].length =
+				(reg_val & VERIPHY_PAIR_C_DISTANCE_MASK) >> VERIPHY_PAIR_C_DISTANCE_POS;
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_3);
+			status->pairs[CABDIAG_PAIR_C].result =
+				(reg_val & VERIPHY_PAIR_C_STATUS_MASK) >> VERIPHY_PAIR_C_STATUS_POS;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_D_MASK) {
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_2);
+			status->pairs[CABDIAG_PAIR_D].length =
+				(reg_val & VERIPHY_PAIR_D_DISTANCE_MASK) >> VERIPHY_PAIR_D_DISTANCE_POS;
+			reg_val = __phy_read(phydev, MSCC_PHY_VERIPHY_CNTL_3);
+			status->pairs[CABDIAG_PAIR_D].result =
+				(reg_val & VERIPHY_PAIR_D_STATUS_MASK) >> VERIPHY_PAIR_D_STATUS_POS;
+		}
+	} else {
+		/* VeriPHY results are invalid */
+		if (status->pairs_bitmask & CABDIAG_PAIR_A_MASK) {
+			status->pairs[CABDIAG_PAIR_A].length = 0xFF;
+			status->pairs[CABDIAG_PAIR_A].result = 0xFF;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_B_MASK) {
+			status->pairs[CABDIAG_PAIR_B].length = 0xFF;
+			status->pairs[CABDIAG_PAIR_B].result = 0xFF;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_C_MASK) {
+			status->pairs[CABDIAG_PAIR_C].length = 0xFF;
+			status->pairs[CABDIAG_PAIR_C].result = 0xFF;
+		}
+		if (status->pairs_bitmask & CABDIAG_PAIR_D_MASK) {
+			status->pairs[CABDIAG_PAIR_D].length = 0xFF;
+			status->pairs[CABDIAG_PAIR_D].result = 0xFF;
+		}
+	}
+	usleep_range(20000, 30000);
+} while (reg_val == 0x8000);
+
+#if 1 // Temp code: Register conditions similation
+	phynl_cabdiag_notification(0x11);
+	status->pairs[CABDIAG_PAIR_A].length = 11;
+	status->pairs[CABDIAG_PAIR_A].result = MSCC_OPEN_PAIR;
+	status->pairs[CABDIAG_PAIR_B].length = 22;
+	status->pairs[CABDIAG_PAIR_B].result = MSCC_ABNORMAL_TERMINATION;
+	status->pairs[CABDIAG_PAIR_C].length = 33;
+	status->pairs[CABDIAG_PAIR_C].result = CROSS_PAIR_SHORT_TO_PAIR_D;
+	status->pairs[CABDIAG_PAIR_D].length = 44;
+	status->pairs[CABDIAG_PAIR_D].result = ABNORMAL_CROSS_PAIR_B;
+#endif // Remove
+
+out_unlock:
+	phy_restore_page(phydev, rc, rc > 0 ? 0 : rc);
+	mutex_unlock(&phydev->lock);
+}
 #ifdef CONFIG_OF_MDIO
 static int vsc85xx_edge_rate_magic_get(struct phy_device *phydev)
 {
@@ -699,6 +852,8 @@ static struct phy_driver vsc85xx_driver[] = {
 	.get_wol	= &vsc85xx_wol_get,
 	.get_tunable	= &vsc85xx_get_tunable,
 	.set_tunable	= &vsc85xx_set_tunable,
+	.set_cable_diag = &vsc85xx_cable_diag_set,
+	.get_cable_diag = &vsc85xx_cable_diag_get,
 },
 {
 	.phy_id		= PHY_ID_VSC8540,

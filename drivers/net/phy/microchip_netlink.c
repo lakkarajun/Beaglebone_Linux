@@ -7,62 +7,7 @@
 #include <linux/netdevice.h>
 #include <net/genetlink.h>
 #include <net/sock.h>
-
-/* genetlink setup */
-enum {
-	PHYNL_CMD_NOOP,
-	PHYNL_CMD_EVENT,		/* only for notifications */
-
-	PHYNL_CMD_WAKE,
-	PHYNL_CMD_SLEEP,
-
-	__PHYNL_CMD_CNT,
-	PHYNL_CMD_MAX = (__PHYNL_CMD_CNT - 1)
-};
-
-enum {
-	PHYNL_ATTR_NOOP,
-	WAKE_ATTR_PHYACCESS,		/* phyaccess nested types */
-	WAKE_ATTR_NOTIFICATION,
-
-	__PHYNL_ATTR_CNT,
-	PHYNL_ATTR_MAX = (__PHYNL_ATTR_CNT - 1)
-};
-
-/* phyaccess nested types */
-#define	PHYACC_ATTR_MODE_READ		0
-#define	PHYACC_ATTR_MODE_WRITE		1
-
-#define	PHYACC_ATTR_BANK_SMI		0
-#define	PHYACC_ATTR_BANK_MISC		1
-#define	PHYACC_ATTR_BANK_PCS		2
-#define	PHYACC_ATTR_BANK_AFE		3
-#define	PHYACC_ATTR_BANK_DSP		4
-#define	PHYACC_ATTR_BANK_INSTRUMENT	5
-
-enum {
-	PHYACC_ATTR_NOOP,
-	PHYACC_ATTR_IFNAME,
-	PHYACC_ATTR_MODE,
-	PHYACC_ATTR_BANK_ADDR,
-	PHYACC_ATTR_OFFSET_ADDR,
-	PHYACC_ATTR_VAL,
-
-	__PHYACC_ATTR_CNT,
-	PHYACC_ATTR_MAX = (__PHYACC_ATTR_CNT - 1)
-};
-
-#define	WAKENOTI_ATTR_STATUS_OK		0
-#define	WAKENOTI_ATTR_STATUS_ABORT	1
-#define	WAKENOTI_ATTR_STATUS_FAILURE	2
-
-enum {
-	WAKENOTI_ATTR_NOOP,
-	WAKENOTI_ATTR_STATUS,
-
-	__WAKENOTI_ATTR_CNT,
-	WAKENOTI_ATTR_MAX = (__WAKENOTI_ATTR_CNT - 1)
-};
+#include "microchip_netlink.h"
 
 static const struct nla_policy phy_wake_policy[PHYNL_ATTR_MAX+1] = {
 	[WAKE_ATTR_PHYACCESS]		= { .type = NLA_NESTED },
@@ -74,6 +19,29 @@ static const struct nla_policy phy_acc_policy[PHYACC_ATTR_MAX + 1] = {
 	[PHYACC_ATTR_BANK_ADDR]		= { .type = NLA_U8 },
 	[PHYACC_ATTR_OFFSET_ADDR]	= { .type = NLA_U16 },
 	[PHYACC_ATTR_VAL] 		= { .type = NLA_U16 },
+};
+
+static const struct nla_policy cabdiag_req_policy[CABDIAG_REQ_ATTR_MAX + 1] = {
+	[CABDIAG_REQ_ATTR_IFNAME]     = { .type = NLA_STRING },
+	[CABDIAG_REQ_ATTR_CMD]        = { .type = NLA_U8 },
+	[CABDIAG_REQ_ATTR_PAIRS_MASK] = { .type = NLA_U8 },
+	[CABDIAG_REQ_ATTR_TIMEOUT]    = { .type = NLA_U8 },
+};
+
+static const struct nla_policy cabdiag_pair_sta_policy[CABDIAG_PAIR_STA_ATTR_MAX + 1] = {
+	[CABDIAG_PAIR_STA_ATTR_RESULT] = { .type = NLA_U8 },
+	[CABDIAG_PAIR_STA_ATTR_LENGTH] = { .type = NLA_U8 },
+};
+
+static const struct nla_policy cabdiag_sta_policy[CABDIAG_STA_ATTR_MAX + 1] = {
+	[CABDIAG_STA_ATTR_IFNAME]     = { .type = NLA_STRING },
+	[CABDIAG_STA_ATTR_PAIRS_MASK] = { .type = NLA_U8 },
+	[CABDIAG_STA_ATTR_STATUS]     = NLA_POLICY_NESTED_ARRAY(cabdiag_pair_sta_policy),
+};
+
+static const struct nla_policy cabdiag_op_policy[CABDIAG_OP_ATTR_MAX + 1] = {
+	[CABDIAG_ATTR_REQUEST]  = { .type = NLA_NESTED },
+	[CABDIAG_ATTR_STATUS]   = { .type = NLA_NESTED },
 };
 
 extern struct genl_family microchipphy_genl_family;
@@ -250,9 +218,244 @@ int phynl_wake_notification(int notification_type)
 	genlmsg_end(msg, hdr);
 	genlmsg_multicast(&microchipphy_genl_family, msg, 0, 0, GFP_ATOMIC);
 
-        return 0;
+	return 0;
 }
 EXPORT_SYMBOL(phynl_wake_notification);
+
+static int phy_cabdiag_request(struct genl_info *info, struct nlattr *nest)
+{
+	struct net *net = genl_info_net(info);
+	struct nlattr *tb[PHYACC_ATTR_MAX + 1];
+	struct phynl_cabdiag_req cabdiag;
+	struct net_device *netdev=NULL;
+	struct sk_buff *msg;
+	int ret;
+	void *hdr;
+
+	if (!nest) {
+		printk("message error\n");
+		return -EINVAL;
+	}
+
+	memset(&cabdiag, 0, sizeof(struct phynl_cabdiag_req));
+	ret = nla_parse_nested(tb, CABDIAG_REQ_ATTR_MAX, nest, cabdiag_req_policy, info->extack);
+	if (ret < 0)
+		return ret;
+
+	if (tb[CABDIAG_REQ_ATTR_IFNAME]) {
+		netdev = dev_get_by_name(net, (char *)nla_data(tb[CABDIAG_REQ_ATTR_IFNAME]));
+		if (netdev) {
+			phydev = netdev->phydev;
+			if (phydev) {
+				if (phydev->drv) {
+					phydriver = netdev->phydev->drv;
+				} else {
+					printk("netdev->phydev->drv == NULL\n");
+					return -EINVAL;
+				}
+			} else {
+				dev_put(netdev);
+				printk("netdev->phydev == NULL\n");
+				return -EINVAL;
+			}
+		} else {
+			printk("can't find net device\n");
+			return -ENODEV;
+		}
+	}
+
+	if (tb[CABDIAG_REQ_ATTR_CMD])
+		cabdiag.cmd = nla_get_u8(tb[CABDIAG_REQ_ATTR_CMD]);
+
+	if (tb[CABDIAG_REQ_ATTR_PAIRS_MASK])
+		cabdiag.pairs_bitmask = nla_get_u8(tb[CABDIAG_REQ_ATTR_PAIRS_MASK]);
+
+	if (tb[CABDIAG_REQ_ATTR_TIMEOUT])
+		cabdiag.timeout = nla_get_u8(tb[CABDIAG_REQ_ATTR_TIMEOUT]);
+
+	if (phydev) {
+		/* Enable PHY cable diagnostics */
+		if (phydriver->set_cable_diag) {
+			phydriver->set_cable_diag(phydev, (void *)&cabdiag);
+		} else {
+			printk("phydev->set_cable_diag == NULL\n");
+			return -ENODEV;
+		}
+	} else {
+		printk("phydev == NULL\n");
+		return -ENODEV;
+	}
+
+	/* reply back */
+	msg = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put_reply(msg, info, &microchipphy_genl_family, 0, PHYNL_CMD_CABDIAG);
+
+	nest = nla_nest_start(msg, CABDIAG_ATTR_REQUEST | NLA_F_NESTED);
+	nla_put_u8(msg, CABDIAG_REQ_ATTR_CMD, cabdiag.cmd);
+	nla_put_u8(msg, CABDIAG_REQ_ATTR_PAIRS_MASK, cabdiag.pairs_bitmask);
+	nla_put_u8(msg, CABDIAG_REQ_ATTR_TIMEOUT, cabdiag.timeout);
+	nla_nest_end(msg, nest);
+
+	genlmsg_end(msg, hdr);
+	genlmsg_reply(msg, info);
+
+	if (netdev)
+		dev_put(netdev);
+
+	return 0;
+}
+
+static int phy_cabdiag_status(struct genl_info *info, struct nlattr *nest)
+{
+	struct net *net = genl_info_net(info);
+	struct nlattr *tb[PHYACC_ATTR_MAX + 1];
+	struct phynl_cabdiag_status status;
+	struct net_device *netdev=NULL;
+	struct sk_buff *msg;
+	int ret;
+	__be64 val_64;
+	void *hdr;
+
+	if (!nest) {
+		printk("message error\n");
+		return -EINVAL;
+	}
+
+	memset(&status, 0, sizeof(struct phynl_cabdiag_status));
+	ret = nla_parse_nested(tb, CABDIAG_STA_ATTR_MAX, nest, cabdiag_sta_policy, info->extack);
+	if (ret < 0)
+		return ret;
+
+	if (tb[CABDIAG_STA_ATTR_IFNAME]) {
+		netdev = dev_get_by_name(net, (char *)nla_data(tb[CABDIAG_STA_ATTR_IFNAME]));
+		if (netdev) {
+			phydev = netdev->phydev;
+			if (phydev) {
+				if (phydev->drv) {
+					phydriver = netdev->phydev->drv;
+				} else {
+					printk("netdev->phydev->drv == NULL\n");
+					return -EINVAL;
+				}
+			} else {
+				dev_put(netdev);
+				printk("netdev->phydev == NULL\n");
+				return -EINVAL;
+			}
+		} else {
+			printk("can't find net device\n");
+			return -ENODEV;
+		}
+	}
+
+	if (tb[CABDIAG_STA_ATTR_PAIRS_MASK])
+		status.pairs_bitmask = nla_get_u8(tb[CABDIAG_STA_ATTR_PAIRS_MASK]);
+
+	if (phydev) {
+		/* Get PHY cable diagnostics status */
+		if (phydriver->get_cable_diag) {
+			phydriver->get_cable_diag(phydev, (void *)&status);
+		} else {
+			printk("phydev->set_cable_diag == NULL\n");
+			return -ENODEV;
+		}
+	} else {
+		printk("phydev == NULL\n");
+		return -ENODEV;
+	}
+
+	/* reply back */
+	msg = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put_reply(msg, info, &microchipphy_genl_family, 0, PHYNL_CMD_CABDIAG);
+
+	nest = nla_nest_start(msg, CABDIAG_ATTR_STATUS | NLA_F_NESTED);
+	nla_put_string(msg, CABDIAG_STA_ATTR_IFNAME, netdev->name);
+	nla_put_u8(msg, CABDIAG_STA_ATTR_PAIRS_MASK, status.pairs_bitmask);
+	val_64 = ((__be64)status.pairs[CABDIAG_PAIR_D].length << 56 |
+			  (__be64)status.pairs[CABDIAG_PAIR_D].result << 48 |
+			  (__be64)status.pairs[CABDIAG_PAIR_C].length << 40 |
+			  (__be64)status.pairs[CABDIAG_PAIR_C].result << 32 |
+			  (__be64)status.pairs[CABDIAG_PAIR_B].length << 24 |
+			  (__be64)status.pairs[CABDIAG_PAIR_B].result << 16 |
+			  (__be64)status.pairs[CABDIAG_PAIR_A].length << 8  |
+			  status.pairs[CABDIAG_PAIR_A].result);
+	nla_put_be64(msg, CABDIAG_STA_ATTR_STATUS, val_64, 4);
+	nla_nest_end(msg, nest);
+
+	genlmsg_end(msg, hdr);
+	genlmsg_reply(msg, info);
+
+	if (netdev)
+		dev_put(netdev);
+
+	return 0;
+}
+
+int phynl_cabdiag_notification(int notification_type)
+{
+	struct nlattr *nest;
+	struct sk_buff *msg;
+	void *hdr;
+
+	/* notify event to user space */
+	msg = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, 0, 0, &microchipphy_genl_family, 0, PHYNL_CMD_CABDIAG);
+
+	nest = nla_nest_start(msg, CABDIAG_ATTR_NOTIFICATION | NLA_F_NESTED);
+	// Raju: Need to fix
+	nla_put_string(msg, CABDIAG_NOTIF_ATTR_IFNAME, "cabdiag_eth0");
+	nla_put_s32(msg, CABDIAG_NOTIF_ATTR_TYPE, notification_type);
+	nla_nest_end(msg, nest);
+
+	genlmsg_end(msg, hdr);
+	genlmsg_multicast(&microchipphy_genl_family, msg, 0, 0, GFP_ATOMIC);
+
+	return 0;
+}
+EXPORT_SYMBOL(phynl_cabdiag_notification);
+
+static int phynl_cabdiag_doit(struct sk_buff *skb, struct genl_info *info)
+{
+	struct nlattr *tb[CABDIAG_OP_ATTR_MAX+1];
+	int ret;
+
+	/* handle received params */
+	ret = genlmsg_parse(info->nlhdr, &microchipphy_genl_family, tb, CABDIAG_OP_ATTR_MAX,
+						cabdiag_op_policy, info ? info->extack : NULL);
+	if (ret < 0) {
+		printk("%s(): genlmsg_parse returns %d\n", __func__, ret);
+		return ret;
+	}
+
+	if (tb[CABDIAG_ATTR_REQUEST]) {
+		/* phy cable diagnostics request */
+		ret = phy_cabdiag_request(info, tb[CABDIAG_ATTR_REQUEST]);
+		if (ret < 0) {
+			printk("phy_cabdiag_request returns %d\n", ret);
+			return ret;
+		}
+	}
+
+	if (tb[CABDIAG_ATTR_STATUS]) {
+		/* phy cable diagnostics status */
+		ret = phy_cabdiag_status(info, tb[CABDIAG_ATTR_STATUS]);
+		if (ret < 0) {
+			printk("phy_cabdiag_status returns %d\n", ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
 
 #define	MICROCHIPPHY_GENL_NAME		"microchipphy"
 #define	MICROCHIPPHY_GENL_VERSION	1
@@ -268,6 +471,10 @@ static const struct genl_ops microchipphy_genl_ops[] = {
 	{
 		.cmd	= PHYNL_CMD_WAKE,
 		.doit	= phynl_wake_doit,
+	},
+	{
+		.cmd	= PHYNL_CMD_CABDIAG,
+		.doit	= phynl_cabdiag_doit,
 	},
 };
 
